@@ -19,6 +19,7 @@ namespace leveldb {
 
 inline uint32_t Block::NumRestarts() const {
   assert(size_ >= sizeof(uint32_t));
+  // the last four bytes
   return DecodeFixed32(data_ + size_ - sizeof(uint32_t));
 }
 
@@ -29,11 +30,14 @@ Block::Block(const BlockContents& contents)
   if (size_ < sizeof(uint32_t)) {
     size_ = 0;  // Error marker
   } else {
+    // if all block is restart arrays + array_size
     size_t max_restarts_allowed = (size_ - sizeof(uint32_t)) / sizeof(uint32_t);
     if (NumRestarts() > max_restarts_allowed) {
+      // logic wrong
       // The size is too small for NumRestarts()
       size_ = 0;
     } else {
+      // restart array offset = block size - sizeof(array_size) - (array_size) * 4
       restart_offset_ = size_ - (1 + NumRestarts()) * sizeof(uint32_t);
     }
   }
@@ -52,22 +56,35 @@ Block::~Block() {
 //
 // If any errors are detected, returns nullptr.  Otherwise, returns a
 // pointer to the key delta (just past the three decoded values).
+
+// every entry format:
+// shared_size + unshared_size + value_size + non_shared_key + value
+// var int + var int + var int + char array[unshared size] + char array[value_size]
 static inline const char* DecodeEntry(const char* p, const char* limit,
                                       uint32_t* shared, uint32_t* non_shared,
                                       uint32_t* value_length) {
+  // defensive programming
+  // when we want to read some memory, we should assert we can read it
   if (limit - p < 3) return nullptr;
   *shared = reinterpret_cast<const uint8_t*>(p)[0];
   *non_shared = reinterpret_cast<const uint8_t*>(p)[1];
   *value_length = reinterpret_cast<const uint8_t*>(p)[2];
+  // means three int are all one byte
   if ((*shared | *non_shared | *value_length) < 128) {
     // Fast path: all three values are encoded in one byte each
     p += 3;
   } else {
+    // get three var ints
+    // move p to the next memory address
+    // limit means memory safe
     if ((p = GetVarint32Ptr(p, limit, shared)) == nullptr) return nullptr;
     if ((p = GetVarint32Ptr(p, limit, non_shared)) == nullptr) return nullptr;
     if ((p = GetVarint32Ptr(p, limit, value_length)) == nullptr) return nullptr;
   }
 
+  // p has added three var ints, the last should be real data ---> non_shared
+  // keys + value
+  // this means that we have passed the limit memory address, logic error
   if (static_cast<uint32_t>(limit - p) < (*non_shared + *value_length)) {
     return nullptr;
   }
@@ -76,16 +93,29 @@ static inline const char* DecodeEntry(const char* p, const char* limit,
 
 class Block::Iter : public Iterator {
  private:
+  // for block
+
+  // when we seek for some specific entry, we need to use binary search by
+  // compare key
   const Comparator* const comparator_;
   const char* const data_;       // underlying block contents
   uint32_t const restarts_;      // Offset of restart array (list of fixed32)
   uint32_t const num_restarts_;  // Number of uint32_t entries in restart array
 
+  // iterator state, now point to which entry
+
+  // one restart array item means probably more than one entry
+  // and the first entry has 0 shared bytes
+
+  // when current_ is the first entry of the ith region, restart_index_ will be
+  // i - 1
+
   // current_ is offset in data_ of current entry.  >= restarts_ if !Valid
-  uint32_t current_;
+
+  uint32_t current_;  // now entry offset
   uint32_t restart_index_;  // Index of restart block in which current_ falls
-  std::string key_;
-  Slice value_;
+  std::string key_;  // real key, shared key + unshared key, this is a string copy
+  Slice value_;  // for now value, we have contiguous memory, we don't need to copy
   Status status_;
 
   inline int Compare(const Slice& a, const Slice& b) const {
@@ -94,14 +124,22 @@ class Block::Iter : public Iterator {
 
   // Return the offset in data_ just past the end of the current entry.
   inline uint32_t NextEntryOffset() const {
+    // because value is the last of entry
     return (value_.data() + value_.size()) - data_;
   }
 
   uint32_t GetRestartPoint(uint32_t index) {
+    // index should less than real restart array size
     assert(index < num_restarts_);
+    // data_ + restart_ is restart array start pointer
+    // every restart array item is uint32_t
     return DecodeFixed32(data_ + restarts_ + index * sizeof(uint32_t));
   }
 
+  // move iterator state to restart array[index]
+
+  // for every invoke, `ParseNextKey` will be followed,
+  // so we haven't changed every iterator state variable
   void SeekToRestartPoint(uint32_t index) {
     key_.clear();
     restart_index_ = index;
@@ -109,6 +147,7 @@ class Block::Iter : public Iterator {
 
     // ParseNextKey() starts at the end of value_, so set value_ accordingly
     uint32_t offset = GetRestartPoint(index);
+    // in `ParseNextKey`, we will use `value_` to change `current_` and `key_`
     value_ = Slice(data_ + offset, 0);
   }
 
@@ -124,6 +163,10 @@ class Block::Iter : public Iterator {
     assert(num_restarts_ > 0);
   }
 
+  // current_ default is equal to restarts_
+  // so default is non-valid
+  // current_ less than restart_ means it point to valid entry, which is current
+  // iterator state
   bool Valid() const override { return current_ < restarts_; }
   Status status() const override { return status_; }
   Slice key() const override {
@@ -135,6 +178,7 @@ class Block::Iter : public Iterator {
     return value_;
   }
 
+  // move to next entry
   void Next() override {
     assert(Valid());
     ParseNextKey();
@@ -145,6 +189,8 @@ class Block::Iter : public Iterator {
 
     // Scan backwards to a restart point before current_
     const uint32_t original = current_;
+
+    // restart array[restart_index_] is always less than current_
     while (GetRestartPoint(restart_index_) >= original) {
       if (restart_index_ == 0) {
         // No more entries
@@ -159,11 +205,15 @@ class Block::Iter : public Iterator {
     do {
       // Loop until end of current entry hits the start of original entry
     } while (ParseNextKey() && NextEntryOffset() < original);
+    // next entry >= current_ means now is prev
   }
 
+  // bigger or equal
   void Seek(const Slice& target) override {
     // Binary search in restart array to find the last restart point
     // with a key < target
+
+    // []
     uint32_t left = 0;
     uint32_t right = num_restarts_ - 1;
     int current_key_compare = 0;
@@ -175,8 +225,12 @@ class Block::Iter : public Iterator {
       current_key_compare = Compare(key_, target);
       if (current_key_compare < 0) {
         // key_ is smaller than target
+        // maybe other entry has the target entry
         left = restart_index_;
       } else if (current_key_compare > 0) {
+        // we don't need - 1
+        // now entry maybe not the first entry of the ith region.
+        // if is, restart_index_ has been i - 1.
         right = restart_index_;
       } else {
         // We're seeking to the key we're already at.
@@ -186,15 +240,19 @@ class Block::Iter : public Iterator {
 
     while (left < right) {
       uint32_t mid = (left + right + 1) / 2;
+
+      // get middle region first entry
       uint32_t region_offset = GetRestartPoint(mid);
       uint32_t shared, non_shared, value_length;
       const char* key_ptr =
           DecodeEntry(data_ + region_offset, data_ + restarts_, &shared,
                       &non_shared, &value_length);
+      // for every restart item, the first entry shared should be zero
       if (key_ptr == nullptr || (shared != 0)) {
         CorruptionError();
         return;
       }
+      // real key
       Slice mid_key(key_ptr, non_shared);
       if (Compare(mid_key, target) < 0) {
         // Key at "mid" is smaller than "target".  Therefore all
@@ -203,6 +261,7 @@ class Block::Iter : public Iterator {
       } else {
         // Key at "mid" is >= "target".  Therefore all blocks at or
         // after "mid" are uninteresting.
+        // the smallest has smaller than target
         right = mid - 1;
       }
     }
@@ -210,17 +269,25 @@ class Block::Iter : public Iterator {
     // We might be able to use our current position within the restart block.
     // This is true if we determined the key we desire is in the current block
     // and is after than the current key.
+
+    // non valid || valid ?
     assert(current_key_compare == 0 || Valid());
+
+    // left is target region, and target bigger than now
+    // this mean that we just need to move right
     bool skip_seek = left == restart_index_ && current_key_compare < 0;
     if (!skip_seek) {
       SeekToRestartPoint(left);
     }
+
+    // we have moved to correct region
     // Linear search (within restart block) for first key >= target
     while (true) {
       if (!ParseNextKey()) {
         return;
       }
       if (Compare(key_, target) >= 0) {
+        // got it
         return;
       }
     }
@@ -233,6 +300,7 @@ class Block::Iter : public Iterator {
 
   void SeekToLast() override {
     SeekToRestartPoint(num_restarts_ - 1);
+    // point to the last entry
     while (ParseNextKey() && NextEntryOffset() < restarts_) {
       // Keep skipping
     }
@@ -248,9 +316,13 @@ class Block::Iter : public Iterator {
   }
 
   bool ParseNextKey() {
+    // get next entry offset
     current_ = NextEntryOffset();
+    // next entry pointer
     const char* p = data_ + current_;
+    // when we start parser, we can't move bigger than restart array start pointer.
     const char* limit = data_ + restarts_;  // Restarts come right after data
+    // iter current has been the last entry before invoke.
     if (p >= limit) {
       // No more entries to return.  Mark as invalid.
       current_ = restarts_;
@@ -260,18 +332,42 @@ class Block::Iter : public Iterator {
 
     // Decode next entry
     uint32_t shared, non_shared, value_length;
+    // p will move to unshared key pointer
     p = DecodeEntry(p, limit, &shared, &non_shared, &value_length);
+    // the shared size of the entry means now key has the equal prefix size with
+    // the prev entry key
+
+    // p == nullptr means decode error
+    // key_size() < shared means logic error, the shared size of the next entry should
+    // small or equal to now key size
     if (p == nullptr || key_.size() < shared) {
       CorruptionError();
       return false;
     } else {
+      // ignore non-shared chars
       key_.resize(shared);
+      // change to next real key
+      // iterator has a copy of real key of current entry
       key_.append(p, non_shared);
+
+      // next value, follow the layout of the entry
+      // p has point to non-shared key memory address
       value_ = Slice(p + non_shared, value_length);
+
+      // we should add `restart_index_`
+      // `restart_index_` should be consistent with current_ to show iter state
+
+      // before this function invoke
+      // when invoke `SeekToRestartPoint`, then restart_index_ has been consistent
+      // when invoke `Next`, restart_index_ maybe should update
+
+      // when current_ is the first entry of the ith region, restart_index_ will be
+      // i - 1
       while (restart_index_ + 1 < num_restarts_ &&
              GetRestartPoint(restart_index_ + 1) < current_) {
         ++restart_index_;
       }
+      // `restart_index_` has been consistent with current_ to show iter state
       return true;
     }
   }
