@@ -52,12 +52,17 @@ void BlockBuilder::Reset() {
   last_key_.clear();
 }
 
+// follow block format
+// buffer_   ------> all real entry
+// restarts_ ------> restart array
 size_t BlockBuilder::CurrentSizeEstimate() const {
   return (buffer_.size() +                       // Raw data buffer
           restarts_.size() * sizeof(uint32_t) +  // Restart array
           sizeof(uint32_t));                     // Restart array length
 }
 
+// append restart array and restart array's size
+// so buffer_ is real entry
 Slice BlockBuilder::Finish() {
   // Append restart array
   for (size_t i = 0; i < restarts_.size(); i++) {
@@ -70,24 +75,37 @@ Slice BlockBuilder::Finish() {
 
 void BlockBuilder::Add(const Slice& key, const Slice& value) {
   Slice last_key_piece(last_key_);
+  // if finished, add has no meaning
   assert(!finished_);
+  // make sure that we are in current restart region
+  // equal means we will start new region
   assert(counter_ <= options_->block_restart_interval);
+  // first add or
+  // not first, should follow specified order
+  // all key is different
   assert(buffer_.empty()  // No values yet?
          || options_->comparator->Compare(key, last_key_piece) > 0);
   size_t shared = 0;
   if (counter_ < options_->block_restart_interval) {
+    // now we are in current region
+
+    // compute same prefix
     // See how much sharing to do with previous string
     const size_t min_length = std::min(last_key_piece.size(), key.size());
+    // so raw :)
     while ((shared < min_length) && (last_key_piece[shared] == key[shared])) {
       shared++;
     }
   } else {
+    // start new region
+
     // Restart compression
     restarts_.push_back(buffer_.size());
     counter_ = 0;
   }
   const size_t non_shared = key.size() - shared;
 
+  // format: shared_size, non_shared size, value_size, non_shared real key, value
   // Add "<shared><non_shared><value_size>" to buffer_
   PutVarint32(&buffer_, shared);
   PutVarint32(&buffer_, non_shared);
@@ -98,8 +116,11 @@ void BlockBuilder::Add(const Slice& key, const Slice& value) {
   buffer_.append(value.data(), value.size());
 
   // Update state
+
+  // more quick
   last_key_.resize(shared);
   last_key_.append(key.data() + shared, non_shared);
+  // of course
   assert(Slice(last_key_) == key);
   counter_++;
 }
