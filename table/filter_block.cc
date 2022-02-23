@@ -28,7 +28,9 @@ void FilterBlockBuilder::StartBlock(uint64_t block_offset) {
 
 void FilterBlockBuilder::AddKey(const Slice& key) {
   Slice k = key;
+  // now key offset
   start_.push_back(keys_.size());
+  // add real key bytes
   keys_.append(k.data(), k.size());
 }
 
@@ -36,6 +38,10 @@ Slice FilterBlockBuilder::Finish() {
   if (!start_.empty()) {
     GenerateFilter();
   }
+
+  // now we know filter block format
+  // filter data array(no compress) --- every filter data offset array --- prev array offset
+  // --- base_lg
 
   // Append array of per-filter offsets
   const uint32_t array_offset = result_.size();
@@ -57,7 +63,11 @@ void FilterBlockBuilder::GenerateFilter() {
   }
 
   // Make list of keys from flattened key structure
+  // length computation ---> next - now
   start_.push_back(keys_.size());  // Simplify length computation
+
+  // get all key
+  // no copy
   tmp_keys_.resize(num_keys);
   for (size_t i = 0; i < num_keys; i++) {
     const char* base = keys_.data() + start_[i];
@@ -74,26 +84,38 @@ void FilterBlockBuilder::GenerateFilter() {
   start_.clear();
 }
 
+// contents is filter block
 FilterBlockReader::FilterBlockReader(const FilterPolicy* policy,
                                      const Slice& contents)
     : policy_(policy), data_(nullptr), offset_(nullptr), num_(0), base_lg_(0) {
   size_t n = contents.size();
   if (n < 5) return;  // 1 byte for base_lg_ and 4 for start of offset array
+  // the last byte
   base_lg_ = contents[n - 1];
+
+  // filter array offset
   uint32_t last_word = DecodeFixed32(contents.data() + n - 5);
+  // this means wrong
   if (last_word > n - 5) return;
+  // real data
   data_ = contents.data();
+  // array start pointer
   offset_ = data_ + last_word;
+  // array size
   num_ = (n - 5 - last_word) / 4;
 }
 
 bool FilterBlockReader::KeyMayMatch(uint64_t block_offset, const Slice& key) {
+  // the index filter array
   uint64_t index = block_offset >> base_lg_;
   if (index < num_) {
+    // get real filter data offset
     uint32_t start = DecodeFixed32(offset_ + index * 4);
+    // limit
     uint32_t limit = DecodeFixed32(offset_ + index * 4 + 4);
     if (start <= limit && limit <= static_cast<size_t>(offset_ - data_)) {
       Slice filter = Slice(data_ + start, limit - start);
+      // real compare depends on policy
       return policy_->KeyMayMatch(key, filter);
     } else if (start == limit) {
       // Empty filters do not match any keys
