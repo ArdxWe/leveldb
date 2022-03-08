@@ -11,6 +11,10 @@
 namespace leveldb {
 
 namespace {
+// what we are doing?
+// what we want to do is the same as merge sort.
+// n children and one current
+// traverse in order(two directions), and maybe current will change
 class MergingIterator : public Iterator {
  public:
   MergingIterator(const Comparator* comparator, Iterator** children, int n)
@@ -32,6 +36,7 @@ class MergingIterator : public Iterator {
     for (int i = 0; i < n_; i++) {
       children_[i].SeekToFirst();
     }
+    // change current
     FindSmallest();
     direction_ = kForward;
   }
@@ -40,6 +45,7 @@ class MergingIterator : public Iterator {
     for (int i = 0; i < n_; i++) {
       children_[i].SeekToLast();
     }
+    // change current
     FindLargest();
     direction_ = kReverse;
   }
@@ -48,10 +54,12 @@ class MergingIterator : public Iterator {
     for (int i = 0; i < n_; i++) {
       children_[i].Seek(target);
     }
+    // change current
     FindSmallest();
     direction_ = kForward;
   }
 
+  // get all children next base of current
   void Next() override {
     assert(Valid());
 
@@ -60,6 +68,8 @@ class MergingIterator : public Iterator {
     // true for all of the non-current_ children since current_ is
     // the smallest child and key() == current_->key().  Otherwise,
     // we explicitly position the non-current_ children.
+
+    // if we are changing direction, maybe we should update all children
     if (direction_ != kForward) {
       for (int i = 0; i < n_; i++) {
         IteratorWrapper* child = &children_[i];
@@ -117,6 +127,7 @@ class MergingIterator : public Iterator {
     return current_->value();
   }
 
+  // all child ok means ok
   Status status() const override {
     Status status;
     for (int i = 0; i < n_; i++) {
@@ -140,11 +151,12 @@ class MergingIterator : public Iterator {
   // of children in leveldb.
   const Comparator* comparator_;
   IteratorWrapper* children_;
-  int n_;
+  int n_;  // child counts
   IteratorWrapper* current_;
   Direction direction_;
 };
 
+// get child smallest
 void MergingIterator::FindSmallest() {
   IteratorWrapper* smallest = nullptr;
   for (int i = 0; i < n_; i++) {
@@ -160,6 +172,7 @@ void MergingIterator::FindSmallest() {
   current_ = smallest;
 }
 
+// get child largest
 void MergingIterator::FindLargest() {
   IteratorWrapper* largest = nullptr;
   for (int i = n_ - 1; i >= 0; i--) {
