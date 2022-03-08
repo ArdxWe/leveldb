@@ -18,14 +18,20 @@ class TestHashFilter : public FilterPolicy {
  public:
   const char* Name() const override { return "TestHashFilter"; }
 
+  // `keys` item should be continuous
   void CreateFilter(const Slice* keys, int n, std::string* dst) const override {
     for (int i = 0; i < n; i++) {
+      // hash real data
       uint32_t h = Hash(keys[i].data(), keys[i].size(), 1);
+      // append
       PutFixed32(dst, h);
     }
   }
 
+  // key maybe in this filter
+  // `may` means that different str may have same hash
   bool KeyMayMatch(const Slice& key, const Slice& filter) const override {
+    // same seed and same str has same hashed value
     uint32_t h = Hash(key.data(), key.size(), 1);
     for (size_t i = 0; i + 4 <= filter.size(); i += 4) {
       if (h == DecodeFixed32(filter.data() + i)) {
@@ -41,6 +47,9 @@ class FilterBlockTest : public testing::Test {
   TestHashFilter policy_;
 };
 
+// filter block format
+// filter data array(no compress) --- every filter data offset array
+// --- prev array offset --- base_lg
 TEST_F(FilterBlockTest, EmptyBuilder) {
   FilterBlockBuilder builder(&policy_);
   Slice block = builder.Finish();
