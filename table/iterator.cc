@@ -13,10 +13,13 @@ Iterator::Iterator() {
 
 Iterator::~Iterator() {
   if (!cleanup_head_.IsEmpty()) {
+    // invoke clean function
     cleanup_head_.Run();
     for (CleanupNode* node = cleanup_head_.next; node != nullptr;) {
       node->Run();
+      //get next
       CleanupNode* next_node = node->next;
+      // remove now
       delete node;
       node = next_node;
     }
